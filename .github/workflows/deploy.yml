@@ -1,0 +1,47 @@
+name: CI/CD Deploy Backend
+
+on:
+  push:
+    branches:
+      - deploy
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build and push image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/innovatech-backend:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/innovatech-backend:${{ github.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin || true
+            docker volume create backend_pgdata || true
+            docker run -d --name postgres --restart unless-stopped -e POSTGRES_USER="${{ secrets.POSTGRES_USER }}" -e POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}" -e POSTGRES_DB="${{ secrets.POSTGRES_DB }}" -v backend_pgdata:/var/lib/postgresql/data -p 5432:5432 postgres:15-alpine || true
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/innovatech-backend:latest
+            docker rm -f backend || true
+            docker run -d --name backend --restart unless-stopped -p 3000:3000 --link postgres:postgres -e DATABASE_HOST=postgres -e DATABASE_USER="${{ secrets.POSTGRES_USER }}" -e DATABASE_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}" -e DATABASE_DB="${{ secrets.POSTGRES_DB }}" ${{ secrets.DOCKERHUB_USERNAME }}/innovatech-backend:latest
